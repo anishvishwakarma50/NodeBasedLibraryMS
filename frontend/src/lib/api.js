@@ -37,6 +37,15 @@ api.interceptors.response.use(
   }
 );
 
+// Add fines API methods
+export const finesAPI = {
+  getAll: (params = {}) => api.get('/fines', { params }),
+  getStudentFines: (studentId, status) => api.get(`/fines/student/${studentId}`, { params: { status } }),
+  pay: (id, data) => api.post(`/fines/${id}/pay`, data),
+  waive: (id, data) => api.post(`/fines/${id}/waive`, data),
+  generate: () => api.post('/fines/generate'),
+}
+
 // Auth API
 export const authAPI = {
   login: (credentials) => api.post('/auth/login', credentials),

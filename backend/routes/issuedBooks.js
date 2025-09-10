@@ -1,8 +1,9 @@
 const express = require('express');
 const { body, query, validationResult } = require('express-validator');
 const { Op } = require('sequelize');
-const { IssuedBook, Book, Student, Librarian } = require('../models');
+const { IssuedBook, Book, Student, Librarian, Fine } = require('../models');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const FineService = require('../services/fineService'); // Import the fine service
 
 const router = express.Router();
 
@@ -268,8 +269,9 @@ router.post('/issue', [
  *           schema:
  *             type: object
  *             properties:
- *               fine_amount:
- *                 type: number
+ *               return_date:
+ *                 type: string
+ *                 format: date
  *               notes:
  *                 type: string
  *     responses:
@@ -281,7 +283,7 @@ router.post('/issue', [
 router.put('/:id/return', [
   authenticateToken,
   authorizeRoles('librarian'),
-  body('fine_amount').optional().isFloat({ min: 0 }),
+  body('return_date').optional().isISO8601().toDate(),
   body('notes').optional().trim()
 ], async (req, res) => {
   try {
@@ -293,61 +295,81 @@ router.put('/:id/return', [
       });
     }
 
-    const issuedBook = await IssuedBook.findOne({
-      where: { 
-        id: req.params.id, 
-        status: 'issued' 
-      },
+    const { return_date, notes } = req.body;
+    
+    const issuedBook = await IssuedBook.findByPk(req.params.id, {
       include: [
         {
           model: Book,
           as: 'book'
+        },
+        {
+          model: Student,
+          as: 'student'
         }
       ]
     });
 
     if (!issuedBook) {
-      return res.status(404).json({ message: 'Issued book not found or already returned' });
+      return res.status(404).json({ message: 'Issued book not found' });
     }
 
-    const { fine_amount = 0, notes } = req.body;
-    const returnDate = new Date();
+    if (issuedBook.status === 'returned') {
+      return res.status(400).json({ message: 'Book already returned' });
+    }
 
-    // Calculate fine if overdue and no fine amount provided
-    let calculatedFine = fine_amount;
-    if (fine_amount === 0 && returnDate > issuedBook.due_date) {
-      const overdueDays = Math.ceil((returnDate - issuedBook.due_date) / (1000 * 60 * 60 * 24));
-      calculatedFine = overdueDays * 2; // $2 per day fine
+    const returnDate = return_date ? new Date(return_date) : new Date();
+    const dueDate = new Date(issuedBook.due_date);
+
+    // Calculate fine if book is returned after due date
+    let fineAmount = 0;
+    if (returnDate > dueDate) {
+      const fineData = await FineService.calculateFine(issuedBook.id);
+      if (fineData) {
+        // Create or update fine record
+        const existingFine = await Fine.findOne({
+          where: { issued_book_id: issuedBook.id }
+        });
+
+        if (existingFine) {
+          await existingFine.update({
+            amount: fineData.amount,
+            days_overdue: fineData.days_overdue,
+            status: 'pending'
+          });
+          fineAmount = fineData.amount;
+        } else {
+          const fine = await Fine.create(fineData);
+          fineAmount = fineData.amount;
+        }
+      }
     }
 
     // Update issued book record
     await issuedBook.update({
       return_date: returnDate,
       status: 'returned',
-      fine_amount: calculatedFine,
+      fine_amount: fineAmount,
       notes: notes || issuedBook.notes
     });
 
-    // Update book's available copies
-    await issuedBook.book.update({
-      available_copies: issuedBook.book.available_copies + 1
+    // Update book available copies
+    await Book.increment('available_copies', {
+      where: { id: issuedBook.book_id }
     });
 
-    const returnedBookWithDetails = await IssuedBook.findByPk(issuedBook.id, {
+    const updatedIssuedBook = await IssuedBook.findByPk(issuedBook.id, {
       include: [
-        {
-          model: Book,
-          as: 'book',
+        { 
+          association: 'book',
           attributes: ['id', 'title', 'author', 'isbn']
         },
-        {
-          model: Student,
-          as: 'student',
+        { 
+          association: 'student',
           attributes: ['id', 'name', 'email', 'student_id']
         },
-        {
-          model: Librarian,
-          as: 'librarian',
+        { 
+          association: 'librarian',
           attributes: ['id', 'name', 'employee_id']
         }
       ]
@@ -355,9 +377,10 @@ router.put('/:id/return', [
 
     res.json({
       message: 'Book returned successfully',
-      issuedBook: returnedBookWithDetails,
-      fine_amount: calculatedFine
+      issuedBook: updatedIssuedBook,
+      fineAmount: fineAmount
     });
+
   } catch (error) {
     console.error('Return book error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -396,17 +419,158 @@ router.get('/overdue', [
           model: Student,
           as: 'student',
           attributes: ['id', 'name', 'email', 'student_id', 'phone']
+        },
+        {
+          model: Fine,
+          as: 'fines',
+          where: { status: 'pending' },
+          required: false
         }
       ],
       order: [['due_date', 'ASC']]
     });
 
-    res.json(overdueBooks);
+    // Calculate total fines for each overdue book
+    const overdueBooksWithFines = overdueBooks.map(book => {
+      const totalFine = book.fines.reduce((sum, fine) => sum + parseFloat(fine.amount), 0);
+      return {
+        ...book.toJSON(),
+        total_fine: totalFine
+      };
+    });
+
+    res.json(overdueBooksWithFines);
   } catch (error) {
     console.error('Get overdue books error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-module.exports = router;
+/**
+ * @swagger
+ * /api/issued-books/{id}/fines:
+ *   get:
+ *     summary: Get fines for a specific issued book
+ *     tags: [Issued Books]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: List of fines for the issued book
+ *       404:
+ *         description: Issued book not found
+ */
+router.get('/:id/fines', [
+  authenticateToken
+], async (req, res) => {
+  try {
+    const issuedBook = await IssuedBook.findByPk(req.params.id, {
+      include: [
+        {
+          model: Fine,
+          as: 'fines'
+        }
+      ]
+    });
 
+    if (!issuedBook) {
+      return res.status(404).json({ message: 'Issued book not found' });
+    }
+
+    // Students can only see their own fines
+    if (req.userRole === 'student' && issuedBook.student_id !== req.user.id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    res.json({
+      issuedBook: {
+        id: issuedBook.id,
+        book_id: issuedBook.book_id,
+        student_id: issuedBook.student_id,
+        issue_date: issuedBook.issue_date,
+        due_date: issuedBook.due_date,
+        return_date: issuedBook.return_date,
+        status: issuedBook.status
+      },
+      fines: issuedBook.fines
+    });
+  } catch (error) {
+    console.error('Get issued book fines error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/issued-books/student/{studentId}/fines:
+ *   get:
+ *     summary: Get all fines for a student
+ *     tags: [Issued Books]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: studentId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [pending, paid, waived]
+ *     responses:
+ *       200:
+ *         description: List of student fines
+ *       403:
+ *         description: Access denied
+ */
+router.get('/student/:studentId/fines', [
+  authenticateToken,
+  query('status').optional().isIn(['pending', 'paid', 'waived'])
+], async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { status } = req.query;
+
+    // Students can only see their own fines
+    if (req.userRole === 'student' && parseInt(studentId) !== req.user.id) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const whereClause = { student_id: studentId };
+    if (status) {
+      whereClause.status = status;
+    }
+
+    const fines = await Fine.findAll({
+      where: whereClause,
+      include: [
+        {
+          association: 'issuedBook',
+          include: [
+            {
+              model: Book,
+              as: 'book',
+              attributes: ['id', 'title', 'author']
+            }
+          ]
+        }
+      ],
+      order: [['created_at', 'DESC']]
+    });
+
+    res.json({ fines });
+  } catch (error) {
+    console.error('Get student fines error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+module.exports = router;

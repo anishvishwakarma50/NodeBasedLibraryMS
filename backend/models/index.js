@@ -5,7 +5,7 @@ const Book = require('./Book');
 const IssuedBook = require('./IssuedBook');
 const SuggestedBook = require('./SuggestedBook');
 const Course = require('./Course');
-
+const Fine = require('./Fine'); // Add this line
 
 // Define associations
 Student.belongsTo(Course, { foreignKey: 'course_id', as: 'course' });
@@ -26,6 +26,12 @@ SuggestedBook.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 SuggestedBook.belongsTo(Librarian, { foreignKey: 'reviewed_by', as: 'reviewer' });
 Student.hasMany(SuggestedBook, { foreignKey: 'student_id', as: 'suggestedBooks' });
 
+// Fine associations
+Fine.belongsTo(IssuedBook, { foreignKey: 'issued_book_id', as: 'issuedBook' });
+Fine.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
+IssuedBook.hasMany(Fine, { foreignKey: 'issued_book_id', as: 'fines' });
+Student.hasMany(Fine, { foreignKey: 'student_id', as: 'fines' });
+
 module.exports = {
   sequelize,
   Student,
@@ -33,6 +39,6 @@ module.exports = {
   Book,
   IssuedBook,
   SuggestedBook,
-  Course
+  Course,
+  Fine // Add this line
 };
-

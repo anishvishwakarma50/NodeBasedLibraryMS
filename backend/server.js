@@ -15,6 +15,7 @@ const bookRoutes = require('./routes/books');
 const issuedBookRoutes = require('./routes/issuedBooks');
 const suggestedBookRoutes = require('./routes/suggestedBooks');
 const courseRoutes = require('./routes/courses');
+const fineRoutes = require('./routes/fines');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -22,12 +23,6 @@ const PORT = process.env.PORT || 5000;
 // Security middleware
 app.use(helmet());
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
-});
-app.use(limiter);
 
 // CORS configuration
 app.use(cors({
@@ -86,6 +81,12 @@ app.use('/api/books', bookRoutes);
 app.use('/api/issued-books', issuedBookRoutes);
 app.use('/api/suggested-books', suggestedBookRoutes);
 app.use('/api/courses', courseRoutes);
+app.use('/api/fines', fineRoutes);
+// In your server.js or app.js
+const CronService = require('./services/cronService');
+
+// Initialize cron jobs
+CronService.init();
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
